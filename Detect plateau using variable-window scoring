@@ -1,0 +1,292 @@
+def detect_plateau_by_window_scoring(stats_df,
+                                     min_points=5,
+                                     max_points=None,
+                                     high_mu_fraction=0.85,
+                                     use_top_k_ref=5,
+                                     weights=None,
+                                     min_duration_h=None,
+                                     slope_mode='linear_fit',
+                                     plot=True,
+                                     return_all_candidates=False):
+    """
+    Detect plateau using variable-window scoring based on: # this value can be discusssed
+    - normalized mean μ      (higher is better)
+    - normalized CV          (lower is better)
+    - normalized slope       (lower is better)
+    - normalized duration    (higher is better)
+
+    Plateau logic:
+    1) Generate all windows with min_points <= window size <= max_points
+    2) Keep only windows with sufficiently high mean μ
+    3) Compute window features: mean μ, CV, |slope|, duration
+    4) Normalize features across all candidate windows
+    5) Compute a weighted score
+    6) Select the best-scoring window
+
+    Parameters
+    ----------
+    stats_df : DataFrame
+        Must contain columns ['Time_h', 'mean']
+    min_points : int
+        Minimum number of points in a candidate plateau
+    max_points : int or None
+        Maximum number of points in a candidate plateau.
+        If None, uses all possible window sizes.
+    high_mu_fraction : float
+        Candidate windows must satisfy:
+            mean(window_mu) >= high_mu_fraction * mu_ref
+    use_top_k_ref : int or None
+        If None, mu_ref = max(mu)
+        If int, mu_ref = mean of top-k mu values
+    weights : dict or None
+        Weights for the scoring function.
+    min_duration_h : float or None
+        Optional minimum plateau duration in hours
+    slope_mode : str
+        'linear_fit' or 'end_to_end' for slope calculation
+    plot : bool
+        Whether to plot the selected plateau
+    return_all_candidates : bool
+        If True, also return a DataFrame of all candidate windows
+
+    Returns
+    -------
+    plateau_info : dict
+    """
+
+    # ---------- Input checks ----------
+    if min_points < 2:
+        raise ValueError("min_points must be >= 2.")
+    if not (0 < high_mu_fraction <= 1):
+        raise ValueError("high_mu_fraction must be in (0, 1].")
+    if slope_mode not in ['linear_fit', 'end_to_end']:
+        raise ValueError("slope_mode must be 'linear_fit' or 'end_to_end'.")
+
+    if weights is None:
+        weights = {
+            'mean_mu': 0.40,
+            'cv': 0.25,
+            'slope': 0.25,
+            'duration': 0.10
+        }
+
+    required_keys = {'mean_mu', 'cv', 'slope', 'duration'}
+    if set(weights.keys()) != required_keys:
+        raise ValueError(f"weights must have exactly these keys: {required_keys}")
+
+    # ---------- Prepare data ----------
+    stats_df = stats_df.sort_values('Time_h').copy()
+    stats_df = stats_df[np.isfinite(stats_df['mean'])].copy()
+
+    # preserve original row index from input file
+    stats_df['original_index'] = stats_df.index
+
+    # now reset internal indexing for window search
+    stats_df = stats_df.reset_index(drop=True)
+
+    if len(stats_df) < min_points:
+        raise ValueError("Not enough valid points.")
+
+    time = stats_df['Time_h'].to_numpy()
+    mu = stats_df['mean'].to_numpy()
+    original_idx = stats_df['original_index'].to_numpy()
+    n = len(mu)
+
+    if max_points is None:
+        max_points = n
+    max_points = min(max_points, n)
+
+    if max_points < min_points:
+        raise ValueError("max_points must be >= min_points.")
+
+    # ---------- Reference high-mu level ----------
+    if use_top_k_ref is None:
+        mu_ref = np.max(mu)
+    else:
+        k = int(use_top_k_ref)
+        if k < 1:
+            raise ValueError("use_top_k_ref must be >= 1 or None.")
+        k = min(k, len(mu))
+        mu_ref = np.mean(np.sort(mu)[-k:])
+
+    high_mu_threshold = high_mu_fraction * mu_ref
+
+    # ---------- Helpers ----------
+    def compute_cv(values):
+        values = np.asarray(values)
+        values = values[np.isfinite(values)]
+        if len(values) == 0:
+            return np.inf
+        mean_val = np.mean(values)
+        if mean_val <= 0:
+            return np.inf
+        if len(values) == 1:
+            return 0.0
+        return np.std(values, ddof=1) / mean_val
+
+    def compute_abs_slope(t, y, mode='linear_fit'):
+        if len(y) < 2:
+            return np.inf
+        if mode == 'end_to_end':
+            dt = t[-1] - t[0]
+            if dt == 0:
+                return np.inf
+            return abs((y[-1] - y[0]) / dt)
+        else:
+            slope = np.polyfit(t, y, 1)[0]
+            return abs(slope)
+
+    def minmax_normalize(arr, invert=False):
+        arr = np.asarray(arr, dtype=float)
+        if len(arr) == 0:
+            return arr
+        a_min = np.min(arr)
+        a_max = np.max(arr)
+        if np.isclose(a_min, a_max):
+            norm = np.ones_like(arr) if invert else np.zeros_like(arr)
+        else:
+            norm = (arr - a_min) / (a_max - a_min)
+        if invert:
+            norm = 1 - norm
+        return norm
+
+    # ---------- Generate candidate windows ----------
+    candidates = []
+
+    for left_idx in range(n):
+        for right_idx in range(left_idx + min_points - 1, min(n, left_idx + max_points)):
+            window_mu = mu[left_idx:right_idx + 1]
+            window_time = time[left_idx:right_idx + 1]
+
+            n_points = len(window_mu)
+            duration = window_time[-1] - window_time[0]
+
+            if min_duration_h is not None and duration < min_duration_h:
+                continue
+
+            mean_mu = np.mean(window_mu)
+
+            # High-mu gate to exclude lag phase
+            if mean_mu < high_mu_threshold:
+                continue
+
+            cv_val = compute_cv(window_mu)
+            abs_slope = compute_abs_slope(window_time, window_mu, mode=slope_mode)
+
+            candidates.append({
+                'left_idx': left_idx,
+                'right_idx': right_idx,
+                'left_original_idx': int(original_idx[left_idx]),
+                'right_original_idx': int(original_idx[right_idx]),
+                'n_points': n_points,
+                'time_start': window_time[0],
+                'time_end': window_time[-1],
+                'duration': duration,
+                'mean_mu': mean_mu,
+                'std_mu': np.std(window_mu, ddof=1) if n_points > 1 else 0.0,
+                'mu_min': np.min(window_mu),
+                'mu_max': np.max(window_mu),
+                'mu_range': np.max(window_mu) - np.min(window_mu),
+                'cv': cv_val,
+                'abs_slope': abs_slope
+            })
+
+    if len(candidates) == 0:
+        result = {
+            'success': False,
+            'reason': 'no_candidate_windows_passed_high_mu_gate',
+            'high_mu_threshold': high_mu_threshold,
+            'mu_ref': mu_ref
+        }
+        return result
+
+    candidates_df = pd.DataFrame(candidates)
+
+    # ---------- Normalize candidate features ----------
+    candidates_df['mean_mu_norm'] = minmax_normalize(candidates_df['mean_mu'], invert=False)
+    candidates_df['cv_norm'] = minmax_normalize(candidates_df['cv'], invert=True)
+    candidates_df['slope_norm'] = minmax_normalize(candidates_df['abs_slope'], invert=True)
+    candidates_df['duration_norm'] = minmax_normalize(candidates_df['duration'], invert=False)
+
+    # ---------- Compute score ----------
+    candidates_df['score'] = (
+        weights['mean_mu'] * candidates_df['mean_mu_norm'] +
+        weights['cv'] * candidates_df['cv_norm'] +
+        weights['slope'] * candidates_df['slope_norm'] +
+        weights['duration'] * candidates_df['duration_norm']
+    )
+
+    # Tie-breaking
+    candidates_df = candidates_df.sort_values(
+        by=['score', 'mean_mu', 'duration', 'cv'],
+        ascending=[False, False, False, True]
+    ).reset_index(drop=True)
+
+    best = candidates_df.iloc[0]
+
+    left_idx = int(best['left_idx'])
+    right_idx = int(best['right_idx'])
+    left_original_idx = int(best['left_original_idx'])
+    right_original_idx = int(best['right_original_idx'])
+
+    plateau_data = stats_df.iloc[left_idx:right_idx + 1].copy()
+
+    plateau_info = {
+        'success': True,
+        'method': 'window_scoring',
+        'time_start': float(best['time_start']),
+        'time_end': float(best['time_end']),
+        'duration': float(best['duration']),
+        'mean_mu': float(best['mean_mu']),
+        'std_mu': float(best['std_mu']),
+        'mu_min': float(best['mu_min']),
+        'mu_max': float(best['mu_max']),
+        'mu_range': float(best['mu_range']),
+        'cv': float(best['cv']),
+        'abs_slope': float(best['abs_slope']),
+        'n_points': int(best['n_points']),
+        'score': float(best['score']),
+        'left_boundary_idx': left_idx,
+        'right_boundary_idx': right_idx,
+        'start': left_original_idx,
+        'end': right_original_idx,
+        'time_values': plateau_data['Time_h'].to_numpy(),
+        'mu_values': plateau_data['mean'].to_numpy(),
+        'original_indices': plateau_data['original_index'].to_numpy(),
+        'high_mu_threshold': float(high_mu_threshold),
+        'high_mu_fraction': float(high_mu_fraction),
+        'mu_ref': float(mu_ref),
+        'weights': weights,
+        'all_stats': stats_df
+    }
+
+    if return_all_candidates:
+        plateau_info['candidates_df'] = candidates_df.copy()
+
+    # ---------- Print selected plateau indices ----------
+    print(f"Selected plateau:")
+    print(f"  Internal indices: start={left_idx}, end={right_idx}")
+    print(f"  Original input-file indices: start={left_original_idx}, end={right_original_idx}")
+
+    # ---------- Plot ----------
+    if plot:
+        fig, ax = plt.subplots(figsize=(16, 8))
+
+        ax.plot(time, mu, 'b.-', alpha=0.7, label='Mean μ')
+        ax.axhline(high_mu_threshold, color='orange', linestyle='--',
+                   label=f'High-μ gate ({high_mu_fraction:.0%} of reference)')
+        ax.axvspan(plateau_info['time_start'], plateau_info['time_end'],
+                   color='green', alpha=0.25, label='Selected plateau')
+        ax.plot(plateau_info['time_values'], plateau_info['mu_values'],
+                'go', label=f"Plateau points (score={plateau_info['score']:.3f})")
+
+        ax.set_xlabel('Time (h)')
+        ax.set_ylabel('Mean μ (h⁻¹)')
+        ax.set_title('Plateau Detection by Variable-Window Scoring')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        plt.tight_layout()
+        plt.ylim(0, 1.2)
+        plt.show()
+
+    return plateau_info
