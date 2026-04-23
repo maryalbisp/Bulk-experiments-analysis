@@ -319,7 +319,7 @@ This helps you visually see:
 
 Glucose:
 
-![image.png](attachment:8c3fd9e1-6510-4bc9-a0d5-404380dd77f6:image.png)
+<img width="1172" height="699" alt="image" src="https://github.com/user-attachments/assets/7dc12c5c-06f1-45f1-8d89-3398dc9e6330" />
 
 # Plateau selection
 
@@ -397,15 +397,15 @@ Sort by: `score` (descending) → `mean_mu` (descending) → `duration` (d
 
 Glucose
 
-![image.png](attachment:0ae60d37-f284-4cda-9cce-8461859923dc:image.png)
+<img width="1578" height="790" alt="image" src="https://github.com/user-attachments/assets/e89a8702-2d62-4add-bf22-5aa103822fe4" />
 
 Glucose + 4µM Cm
 
-![image.png](attachment:752e0a1f-b155-416a-91eb-3935ab22b295:image.png)
+<img width="1589" height="790" alt="image" src="https://github.com/user-attachments/assets/31796df2-e984-4d80-8dc2-a8c995de667b" />
 
 Glucose + 8µM Cm
 
-![image.png](attachment:8b25252d-5add-4246-b3cd-60cf5c5c3503:image.png)
+<img width="1589" height="790" alt="image" src="https://github.com/user-attachments/assets/5b24a912-30dd-4f71-87b0-b5036fc6c267" />
 
 # Fluorescence/Abs (Fl not corrected yet)
 
@@ -413,24 +413,24 @@ The fluorescence-to-absorbance ratio was used as an estimate of relative ribosom
 
 Glucose:
 
-![image.png](attachment:2cb2e611-e100-43e7-8bc6-f5fac6f766fa:image.png)
+<img width="1587" height="889" alt="image" src="https://github.com/user-attachments/assets/47148ff1-0f9c-45b4-a6b1-b78e3d2312ed" />
 
-![image.png](attachment:860b4fa7-92ce-43bc-81f0-1cac6a441c32:image.png)
+<img width="1604" height="889" alt="image" src="https://github.com/user-attachments/assets/b2788cca-c689-41bc-b2e2-1c474d9ca818" />
 
 Glucose + 4µM Cm
 
-![image.png](attachment:68c8de36-6713-4b3c-bc40-971eff0fdf65:image.png)
+<img width="1583" height="889" alt="image" src="https://github.com/user-attachments/assets/b7c14a6e-8182-4e87-a407-e7f8bada7b80" />
 
-![image.png](attachment:fb904dab-1b8f-40ac-b900-69138cc10a08:image.png)
+<img width="1600" height="889" alt="image" src="https://github.com/user-attachments/assets/637df3cc-f0f7-4d02-aca5-9c65f6ba778d" />
 
 Glucose +8µM Cm
 
-![image.png](attachment:2bafe0d9-5448-4d7b-b52d-63ecdca15ead:image.png)
+<img width="1583" height="889" alt="image" src="https://github.com/user-attachments/assets/f067427e-5963-497c-ac30-7d6bee306303" />
 
-![image.png](attachment:b86242b6-abb2-448e-9970-177ae513ada8:image.png)
+<img width="1600" height="889" alt="image" src="https://github.com/user-attachments/assets/a2107808-bccd-4dbb-8ba8-6fba91f8d339" />
 
 # Fl/Abs vs Growth rate
 
-![image.png](attachment:19dce0d6-0714-4fc3-a084-c5f1cc877c07:image.png)
+<img width="883" height="727" alt="image" src="https://github.com/user-attachments/assets/c23ea128-d0e1-4141-b67c-3a2a3f5bee42" />
 
-![image.png](attachment:fea10c70-39be-48d5-8a2e-74448053b5c8:image.png)
+<img width="874" height="727" alt="image" src="https://github.com/user-attachments/assets/0b261a86-1254-4df8-8e82-53ae08e2829e" />
