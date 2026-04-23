@@ -1,0 +1,414 @@
+"""
+Data Loading and Smoothing Module
+==================================
+
+Functions to:
+1. Load blank-subtracted CSV file
+2. Apply Savitzky-Golay smoothing to reduce noise
+3. Visualize raw vs smoothed data
+4. Export smoothed data to CSV (clean format, no _smooth suffix)
+
+Smoothing is critical for calculating instantaneous growth rates,
+as the numerical derivative amplifies noise in the raw data.
+"""
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.signal import savgol_filter
+from pathlib import Path
+
+
+# ============================================================================
+# 1. LOAD BLANK-SUBTRACTED DATA
+# ============================================================================
+
+def load_blank_subtracted(csv_file="blank_subtracted.csv"):
+    """
+    Load the blank-subtracted CSV file into a pandas DataFrame.
+    
+    Parameters
+    ----------
+    csv_file : str or Path
+        Path to the blank_subtracted.csv file
+    
+    Returns
+    -------
+    df : DataFrame
+        Columns: Time_h, Well, Group, Blank_used, Absorbance_600, 
+                 Fluorescence_510, Fluorescence_550
+ 
+    """
+    
+    df = pd.read_csv(csv_file)
+    
+ 
+    return df
+
+
+# ============================================================================
+# 2. SMOOTH DATA USING SAVITZKY-GOLAY FILTER
+# ============================================================================
+
+def smooth_data(df, window_length, polyorder, columns_to_smooth=None):
+    """
+    Apply Savitzky-Golay smoothing to specified columns in the DataFrame.
+    
+    Savitzky-Golay filter:
+    - Preserves peak shapes better than moving average
+    - Smooths noise without losing trend information
+    - Essential for calculating accurate derivatives (growth rates)
+    
+    Parameters
+    ----------
+    df : DataFrame
+        Input data (from load_blank_subtracted)
+    
+    window_length : int
+        Length of the smoothing window (must be odd, typically 5-21)
+        Larger = more smoothing, but loses detail
+        Default: 11 (recommended for most plate reader data)
+    
+    polyorder : int
+        Polynomial order for the filter (typically 1-3)
+        1 = linear fit
+        2 = quadratic fit (recommended)
+        3 = cubic fit
+        Default: 2
+    
+    columns_to_smooth : list or None
+        Which columns to smooth
+        Default: ['Absorbance_600', 'Fluorescence_510', 'Fluorescence_550']
+    
+    Returns
+    -------
+    df_smooth : DataFrame
+        New DataFrame with additional columns:
+        - 'Absorbance_600_smooth'
+        - 'Fluorescence_510_smooth'
+        - 'Fluorescence_550_smooth'
+        Original columns retained for comparison.
+    
+    Notes
+    -----
+    Each well is smoothed INDEPENDENTLY to preserve well-specific dynamics.
+    Smoothing is applied per well, NOT across wells.
+    
+    Example
+    -------
+    >>> df = load_blank_subtracted('blank_subtracted.csv')
+    >>> df_smooth = smooth_data(df, window_length=11, polyorder=2)
+    """
+    
+    if columns_to_smooth is None:
+        columns_to_smooth = ['Absorbance_600', 'Fluorescence_510', 'Fluorescence_550']
+    
+    # Ensure window_length is odd
+    if window_length % 2 == 0:
+        window_length += 1
+    
+    print(f"\n{'='*80}")
+    print(f"SMOOTHING DATA")
+    print(f"{'='*80}\n")
+    print(f"Method: Savitzky-Golay Filter")
+    print(f"  Window length: {window_length}")
+    print(f"  Polynomial order: {polyorder}")
+    print(f"  Columns to smooth: {columns_to_smooth}")
+    print(f"\nSmoothing strategy:")
+    print(f"  • Smooth each well INDEPENDENTLY")
+    print(f"  • Preserves biological trends")
+    print(f"  • Reduces measurement noise")
+    print()
+    
+    df_smooth = df.copy()
+    
+    wells = df['Well'].unique()
+    print(f"Processing {len(wells)} wells:\n")
+    
+    for well in wells:
+        well_mask = df['Well'] == well
+        
+        # Get data for this well
+        well_data = df[well_mask]
+        
+        # Skip if not enough data points
+        if len(well_data) < window_length:
+            print(f"  {well}: SKIPPED (only {len(well_data)} points, need ≥ {window_length})")
+            continue
+        
+        # Apply smoothing to each column
+        for col in columns_to_smooth:
+            if col not in df.columns:
+                continue
+            
+            # Get values for this well
+            raw_values = well_data[col].values
+            
+            # Skip if all NaN
+            if np.all(np.isnan(raw_values)):
+                continue
+            
+            # Apply Savitzky-Golay filter
+            try:
+                smooth_values = savgol_filter(raw_values, window_length, polyorder)
+                df_smooth.loc[well_mask, col + '_smooth'] = smooth_values
+            except (ValueError, np.linalg.LinAlgError) as e:
+                print(f"  {well}: WARNING - could not smooth {col}: {e}")
+                continue
+        
+        print(f"  {well}: ✓ smoothed")
+    
+    print(f"\n{'='*80}")
+    print(f"✓ Smoothing complete")
+    print(f"New columns (for internal use): {[c + '_smooth' for c in columns_to_smooth]}")
+    print(f"{'='*80}\n")
+    
+    return df_smooth
+
+
+# ============================================================================
+# 3. VISUALIZE RAW vs SMOOTHED DATA
+# ============================================================================
+
+def plot_raw_vs_smoothed(df, well_prefix, columns_to_plot, figsize=(12, 8)):
+    """
+    Create side-by-side plots comparing raw vs smoothed data for a well group.
+    
+    Parameters
+    ----------
+    df : DataFrame
+        Data with both raw and smoothed columns
+    
+    well_prefix : str
+        Well prefix to plot (e.g., 'C' for C2-C10)
+    
+    columns_to_plot : list or None
+        Which columns to compare
+        Default: ['Absorbance_600', 'Fluorescence_510', 'Fluorescence_550']
+    
+    figsize : tuple
+        Figure size (width, height)
+    
+    Returns
+    -------
+    None (displays plot)
+    """
+    
+    if columns_to_plot is None:
+        columns_to_plot = ['Absorbance_600', 'Fluorescence_510', 'Fluorescence_550']
+    
+    wells = sorted([w for w in df['Well'].unique() if w.startswith(well_prefix)])
+    colors = plt.cm.Set3(np.linspace(0, 1, len(wells)))
+    
+    fig, axes = plt.subplots(len(columns_to_plot), 1, figsize=figsize)
+    if len(columns_to_plot) == 1:
+        axes = [axes]
+    
+    for ax_idx, col in enumerate(columns_to_plot):
+        ax = axes[ax_idx]
+        
+        col_smooth = col + '_smooth'
+        
+        for well, color in zip(wells, colors):
+            well_data = df[df['Well'] == well].sort_values('Time_h')
+            
+            # Plot raw data
+            ax.plot(well_data['Time_h'], well_data[col], 
+                   'o-', linewidth=1, markersize=3, color=color, alpha=0.4, label=f'{well} (raw)')
+            
+            # Plot smoothed data if available
+            if col_smooth in well_data.columns:
+                ax.plot(well_data['Time_h'], well_data[col_smooth],
+                       's-', linewidth=2.5, markersize=4, color=color, alpha=0.9, label=f'{well} (smooth)')
+        
+        ax.set_xlabel('Time (hours)', fontsize=11, fontweight='bold')
+        ax.set_ylabel(col.replace('_', ' '), fontsize=11, fontweight='bold')
+        ax.set_title(f'{col}: Raw vs Smoothed Data', fontsize=12, fontweight='bold')
+        ax.legend(fontsize=8, ncol=3, loc='best')
+        ax.grid(True, alpha=0.3)
+    
+    plt.suptitle(f'Raw vs Smoothed: Well prefix {well_prefix}', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    
+    plot_file = f'raw_vs_smoothed_{well_prefix}.png'
+    plt.savefig(plot_file, dpi=300, bbox_inches='tight')
+    print(f"✓ Saved plot: {plot_file}\n")
+    
+    plt.show()
+
+
+# ============================================================================
+# 4. EXPORT SMOOTHED DATA TO CSV
+# ============================================================================
+
+def export_smoothed_data(df, out_path="blank_subtracted_smoothed.csv"):
+    """
+    Export smoothed data to CSV file with clean column structure.
+    
+    Output columns (same as input CSV):
+      Time_h, Well, Group, Blank_used, Absorbance_600, Fluorescence_510, Fluorescence_550
+    
+    Values are SMOOTHED (not raw). No _smooth suffix in column names.
+    
+    Parameters
+    ----------
+    df : DataFrame
+        Data with smoothed columns (e.g., Absorbance_600_smooth)
+    
+    out_path : str
+        Output CSV file path
+        Default: "blank_subtracted_smoothed.csv"
+    
+    Returns
+    -------
+    None (writes CSV file)
+    
+    Example
+    -------
+    >>> df = load_blank_subtracted('blank_subtracted.csv')
+    >>> df_smooth = smooth_data(df, window_length=11, polyorder=2)
+    >>> export_smoothed_data(df_smooth, 'smoothed.csv')
+    
+    Result:
+        Columns: Time_h, Well, Group, Blank_used, Absorbance_600, Fluorescence_510, Fluorescence_550
+        Values:  All smoothed (no _smooth suffix)
+    """
+    
+    print(f"\n{'='*80}")
+    print(f"EXPORTING SMOOTHED DATA")
+    print(f"{'='*80}\n")
+    
+    # Create export dataframe with metadata
+    df_export = pd.DataFrame()
+    
+    metadata_cols = ['Time_h', 'Well', 'Group', 'Blank_used']
+    measurement_cols = ['Absorbance_600', 'Fluorescence_510', 'Fluorescence_550']
+    
+    # Copy metadata as-is
+    for col in metadata_cols:
+        if col in df.columns:
+            df_export[col] = df[col]
+    
+    # For measurement columns: use smoothed if available, otherwise use raw
+    print("Columns in export:")
+    for col in measurement_cols:
+        col_smooth = col + '_smooth'
+        
+        if col_smooth in df.columns:
+            # Use smoothed column
+            df_export[col] = df[col_smooth]
+            print(f"  {col}: ✓ using smoothed values")
+        elif col in df.columns:
+            # Fallback to raw if smoothed not available
+            df_export[col] = df[col]
+            print(f"  {col}: ⚠ smoothed column not found, using raw values")
+        else:
+            print(f"  {col}: ✗ column not found in data")
+    
+    # Export to CSV
+    df_export.to_csv(out_path, index=False)
+    
+    print(f"\n{'='*80}")
+    print(f"✓ Exported to: {out_path}")
+    print(f"  Shape: {df_export.shape[0]} rows × {df_export.shape[1]} columns")
+    print(f"  Columns: {df_export.columns.tolist()}")
+    print(f"\nColumn structure (same as input):")
+    print(f"  Time_h, Well, Group, Blank_used,")
+    print(f"  Absorbance_600, Fluorescence_510, Fluorescence_550")
+    print(f"\nNote: All measurement values are SMOOTHED (not raw)")
+    print(f"      Ready for calculating instantaneous growth rates!")
+    print(f"{'='*80}\n")
+
+
+# ============================================================================
+# 5. COMPLETE WORKFLOW FUNCTION
+# ============================================================================
+
+def process_plate_reader_smoothing(csv_file="blank_subtracted.csv",
+                                   window_length=15,
+                                   polyorder=2,
+                                   plot_well_prefix='C',
+                                   export_smoothed=True,
+                                   output_file="blank_subtracted_smoothed_15ws.csv"):
+    """
+    Complete workflow: Load → Smooth → Plot → Export
+    
+    Parameters
+    ----------
+    csv_file : str
+        Input blank-subtracted CSV file
+    
+    window_length : int
+        Smoothing window (must be odd)
+        Default: 11 (recommended)
+    
+    polyorder : int
+        Polynomial order for smoothing
+        Default: 2
+    
+    plot_well_prefix : str
+        Well prefix to visualize
+        Default: 'C'
+    
+    export_smoothed : bool
+        Whether to export smoothed data
+        Default: True
+    
+    output_file : str
+        Output CSV filename
+        Default: "blank_subtracted_smoothed.csv"
+    
+    Returns
+    -------
+    df_smooth : DataFrame
+        Smoothed data with both raw and _smooth columns
+    
+    
+
+    # Step 1: Load
+    df = load_blank_subtracted(csv_file) 
+    
+    # Step 2: Smooth
+    df_smooth = smooth_data(df, window_length=window_length, polyorder=polyorder) 
+    
+    # Step 3: Plot
+    plot_raw_vs_smoothed(df_smooth, well_prefix=plot_well_prefix)
+    
+    # Step 4: Export
+    if export_smoothed:
+        export_smoothed_data(df_smooth, out_path=output_file)
+    
+    return df_smooth
+
+
+# ============================================================================
+# PARAMETER GUIDE
+# ============================================================================
+
+"""
+SMOOTHING PARAMETERS GUIDE
+===========================
+
+window_length (odd number):
+  - 5:  Minimal smoothing, keeps most detail (noisy)
+  - 7:  Light smoothing
+  - 11: RECOMMENDED for plate reader data
+  - 15: Moderate smoothing
+  - 21: Heavy smoothing (loses detail)
+  - 31: Very heavy smoothing (use with caution)
+
+polyorder:
+  - 1: Linear fit (most smoothing, straightens curves)
+  - 2: RECOMMENDED (quadratic, preserves curvature)
+  - 3: Cubic fit (minimal smoothing, keeps shape)
+
+For calculating growth rates (derivatives):
+  - Use window_length = 11 and polyorder = 2
+  - This reduces noise while preserving biological trends
+
+For very noisy data:
+  - Try window_length = 15-21, polyorder = 2
+
+For subtle dynamics:
+  - Try window_length = 7-9, polyorder = 2
+"""
