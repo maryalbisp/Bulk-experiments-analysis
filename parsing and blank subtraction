@@ -1,0 +1,400 @@
+"""
+Plate Reader parsing Script - MODIFIED
+========================================
+Reads a Synergy H1 plate-reader .txt export containing three kinetic reads:
+  - Absorbance 600 nm  (Read 1:600)
+  - Fluorescence Ex457/Em510  (Read 2:457,510)
+  - Fluorescence Ex457/Em550  (Read 3:457,550)
+
+Groups wells by experimental condition, computes mean +/- SD per group,
+and generates growth / fluorescence curves.
+
+MODIFICATION: Blank subtraction now calculates the AVERAGE of all blank wells
+for each condition, then subtracts this single average value from each sample
+well at each time point.
+
+Usage (in VS Code terminal):
+    pip install pandas matplotlib numpy
+    python plate_reader_analysis.py
+"""
+
+import re
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+# ============================================================
+# 1. CONFIGURATION  --  edit these if needed
+# ============================================================
+
+# Path to your plate-reader file  (change to match your local path)
+DATA_FILE = Path("0328_Rib_WT_Glu_0_4_8.txt")
+
+# Well -> condition mapping
+groups = {
+    "WT Glucose + 8 uM":   [f"B{i}" for i in range(2, 12)],
+    "WT Glucose + 4 uM":   [f"C{i}" for i in range(2, 12)],
+    "WT Glucose":           [f"D{i}" for i in range(2, 12)],
+    "Rib Glucose + 8 uM":    [f"E{i}" for i in range(2, 12)],
+    "Rib Glucose + 4 uM":    [f"F{i}" for i in range(2, 12)],
+    "Rib Glucose":            [f"G{i}" for i in range(2, 12)],
+    "Blank Glucose":         ["D12"],
+    "Blank Glucose + 4 uM": ["C12"],
+    "Blank Glucose + 8 uM":["B12"],
+}
+
+# Friendly names for the three reads
+READ_LABELS = {
+    "Read 1:600":      "Absorbance 600 nm",
+    "Read 2:457,510":  "Fluorescence (Ex457 / Em510)",
+    "Read 3:457,550":  "Fluorescence (Ex457 / Em550)",
+}
+
+# ============================================================
+# 2. PARSER  --  extracts each kinetic block from the .txt file
+# ============================================================
+
+def time_to_hours_v1(time_str):
+    """Convert 'H:MM:SS' or 'HH:MM:SS' string to decimal hours."""
+    # i think better to transform to seconds and then to hours, to avoid any issues with formatting        
+    parts = time_str.strip().split(":")
+    h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
+    return h + m / 60.0 + s / 3600.0
+
+def time_to_hours(time_str):
+    """Convert 'H:MM:SS' or 'HH:MM:SS' string to decimal hours."""
+    parts = time_str.strip().split(":")
+    h, m, s = map(int, parts)
+    total_seconds = h * 3600 + m * 60 + s
+    print(h,m,s,total_seconds)
+    return total_seconds / 3600.0
+
+def parse_plate_reader_no_deleting_points(filepath):
+    """
+    Parse a Synergy H1 kinetic export into one DataFrame per read type.
+
+    Returns
+    -------
+    dict  :  { 'Read 1:600': DataFrame, 'Read 2:457,510': ..., ... }
+             Each DataFrame has columns = well names (e.g. 'B1') and
+             index = time in hours.
+    """
+    with open(filepath, "r", encoding="latin-1") as f:
+        raw_lines = f.readlines()
+
+    # Strip carriage returns
+    lines = [l.rstrip("\r\n") for l in raw_lines]
+
+    # Locate section headers like "Read 1:600", "Read 2:457,510", etc.
+    section_starts = []
+    for i, line in enumerate(lines):
+        if re.match(r"^Read \d+:", line):
+            section_starts.append((i, line.strip()))
+
+    data_blocks = {}
+
+    for idx, (start_line, section_name) in enumerate(section_starts):
+        # The header row with well names is 2 lines after the section label
+        header_line = start_line + 2
+        headers = lines[header_line].split("\t")
+
+        # First two cols are Time and Temperature; the rest are wells
+        well_names = headers[2:]
+
+        times = []
+        values = []
+
+        # Read data rows until we hit an empty line or the next section
+        row = header_line + 1
+        while row < len(lines):
+            parts = lines[row].split("\t")
+            if len(parts) < 3 or parts[0].strip() == "":
+                break
+            try:
+                t = time_to_hours(parts[0])
+                #print(t, parts[0])
+            except (ValueError, IndexError):
+                break
+            times.append(t)
+            row_vals = [float(v) if v.strip() != "" else np.nan for v in parts[2:]]
+            values.append(row_vals)
+            row += 1
+
+        df = pd.DataFrame(values, columns=well_names, index=times)
+        df.index.name = "Time (h)"
+        data_blocks[section_name] = df
+
+    return data_blocks
+
+def parse_plate_reader(filepath):
+    """
+    Parse a Synergy H1 kinetic export into one DataFrame per read type.
+
+    Returns
+    -------
+    dict  :  { 'Read 1:600': DataFrame, 'Read 2:457,510': ..., ... }
+             Each DataFrame has columns = well names (e.g. 'B1') and
+             index = time in hours.
+    """
+    with open(filepath, "r", encoding="latin-1") as f:
+        raw_lines = f.readlines()
+
+    # Strip carriage returns
+    lines = [l.rstrip("\r\n") for l in raw_lines]
+
+    # Locate section headers like "Read 1:600", "Read 2:457,510", etc.
+    section_starts = []
+    for i, line in enumerate(lines):
+        if re.match(r"^Read \d+:", line):
+            section_starts.append((i, line.strip()))
+
+    data_blocks = {}
+
+    for idx, (start_line, section_name) in enumerate(section_starts):
+        # The header row with well names is 2 lines after the section label
+        header_line = start_line + 2
+        headers = lines[header_line].split("\t")
+
+        # First two cols are Time and Temperature; the rest are wells
+        well_names = headers[2:]
+
+        times = []
+        values = []
+
+        # Read data rows until we hit an empty line or the next section
+        row = header_line + 1
+        while row < len(lines):
+            parts = lines[row].split("\t")
+            if len(parts) < 3 or parts[0].strip() == "":
+                break
+            try:
+                t = time_to_hours(parts[0])
+            except (ValueError, IndexError):
+                break
+            times.append(t)
+            row_vals = [float(v) if v.strip() != "" else np.nan for v in parts[2:]]
+            values.append(row_vals)
+            row += 1
+
+        df = pd.DataFrame(values, columns=well_names, index=times)
+
+        # Delete the first 5 time points
+        df = df.iloc[5:].copy()
+
+        df.index.name = "Time (h)"
+        data_blocks[section_name] = df
+
+    return data_blocks
+
+# ============================================================
+# 3. GROUP STATISTICS
+# ============================================================
+
+def group_stats(df, groups):
+    """
+    Compute mean and std for each condition group over time.
+
+    Returns dict  { group_name: {'mean': Series, 'std': Series} }
+    """
+    stats = {}
+    for name, wells in groups.items():
+        # Keep only wells present in the data
+        present = [w for w in wells if w in df.columns]
+        if not present:
+            continue
+        sub = df[present]
+        stats[name] = {
+            "mean": sub.mean(axis=1),
+            "std":  sub.std(axis=1),
+        }
+    return stats
+
+
+
+# ============================================================
+# 6. EXPORT TO CSV (tidy / long format)
+# ============================================================
+
+def export_tidy_csv(data_blocks, groups, out_path="tidy_data.csv"):
+    """
+    Export all reads into a single tidy CSV with columns:
+    Time_h, Well, Group, Absorbance_600, Fluorescence_510, Fluorescence_550
+    """
+    # Build well -> group lookup
+    well_to_group = {}
+    for gname, wells in groups.items():
+        for w in wells:
+            well_to_group[w] = gname
+
+    records = []
+    od_df  = data_blocks.get("Read 1:600")
+    fl1_df = data_blocks.get("Read 2:457,510")
+    fl2_df = data_blocks.get("Read 3:457,550")
+
+    if od_df is None:
+        print("No OD data found -- cannot export.")
+        return
+
+    time_vals = od_df.index.tolist()
+    for well in od_df.columns:
+        grp = well_to_group.get(well, "Unknown")
+        od_vals  = od_df[well].values
+        fl1_vals = fl1_df[well].values if (fl1_df is not None and well in fl1_df.columns) else [np.nan] * len(time_vals)
+        fl2_vals = fl2_df[well].values if (fl2_df is not None and well in fl2_df.columns) else [np.nan] * len(time_vals)
+        for i, t in enumerate(time_vals):
+            records.append({
+                "Time_h": round(t, 4),
+                "Well": well,
+                "Group": grp,
+                "Absorbance_600":   od_vals[i],
+                "Fluorescence_510": fl1_vals[i],
+                "Fluorescence_550": fl2_vals[i],
+            })
+
+    tidy = pd.DataFrame(records)
+    tidy.to_csv(out_path, index=False)
+    print(f"\n  Tidy CSV exported -> {out_path}  ({len(tidy)} rows)")
+
+
+# ============================================================
+# 7. BLANK-SUBTRACTED EXPORT (MODIFIED)
+# ============================================================
+
+# Map each sample group to the blank that should be subtracted.
+# Edit this if your blank assignment is different.
+BLANK_MAP = {
+    "Rib Glucose + 8 uM":  "Blank Glucose + 8 uM",
+    "Rib Glucose + 4 uM":  "Blank Glucose + 4 uM",          
+    "Rib Glucose":          "Blank Glucose",
+    "WT Glucose + 8 uM":   "Blank Glucose + 8 uM",
+    "WT Glucose + 4 uM":   "Blank Glucose + 4 uM",         
+    "WT Glucose":           "Blank Glucose",
+}
+
+
+def export_blank_subtracted(data_blocks, groups, blank_map=BLANK_MAP,
+                            out_path="blank_subtracted.csv"):
+    """
+    Subtract the AVERAGE blank (across all blank wells for that condition)
+    from every sample well at each time point.
+    
+    MODIFICATION: This version calculates the AVERAGE absorbance/fluorescence
+    across all blank wells for a given condition, then subtracts this single
+    average time-series from each sample well.
+    
+    Process:
+    1. For each blank group (e.g., "Blank Glucose + 8 uM"):
+       - If multiple blank wells exist, calculate MEAN at each time point
+       - This mean time-series becomes the "blank value" for that condition
+    
+    2. For each sample group (e.g., "WT Glucose + 8 uM"):
+       - Get corresponding blank group (e.g., "Blank Glucose + 8 uM")
+       - For each sample well and each time point:
+         - Subtract the average blank value at that time point
+    
+    Columns: Time_h, Well, Group, Blank_used,
+             Absorbance_600, Fluorescence_510, Fluorescence_550
+
+    Returns
+    -------
+    None (writes CSV file)
+    """
+    od_df  = data_blocks.get("Read 1:600")
+    fl1_df = data_blocks.get("Read 2:457,510")
+    fl2_df = data_blocks.get("Read 3:457,550")
+
+    if od_df is None:
+        print("No OD data found -- cannot export.")
+        return
+
+    
+    # ========================================================================
+    # STEP 1: PRE-COMPUTE AVERAGE BLANK TIME-SERIES FOR EACH BLANK GROUP
+    # ========================================================================
+    
+    blank_series = {}  # { blank_group_name: {read_key: Series} }
+    blank_names = [g for g in groups if g.startswith("Blank")]
+    
+    print(f"Found {len(blank_names)} blank groups:\n")
+    
+    for bname in blank_names:
+        bwells = [w for w in groups[bname] if w in od_df.columns]
+        if not bwells:
+            print(f"  {bname}: WARNING - no wells found in data")
+            continue
+        
+        print(f"  {bname}:")
+        print(f"    Wells: {bwells}")
+        
+        # Calculate AVERAGE of all blank wells at each time point
+        # This is the KEY MODIFICATION
+        blank_series[bname] = {
+            "od":  od_df[bwells].mean(axis=1),  # Mean across blank wells
+            "fl1": fl1_df[bwells].mean(axis=1) if fl1_df is not None else None,
+            "fl2": fl2_df[bwells].mean(axis=1) if fl2_df is not None else None,
+        }
+
+    
+    # ========================================================================
+    # STEP 2: SUBTRACT AVERAGE BLANK FROM EACH SAMPLE WELL
+    # ========================================================================
+    
+    # Build well -> group lookup (sample groups only)
+    sample_groups = {k: v for k, v in groups.items() if not k.startswith("Blank")}
+
+    records = []
+    time_vals = od_df.index.tolist()
+    
+    print(f"Processing {len(sample_groups)} sample groups:\n")
+
+    for gname, wells in sample_groups.items():
+        bname = blank_map.get(gname)
+        
+        if bname is None:
+            print(f"  {gname}: ERROR - no blank mapping defined in BLANK_MAP")
+            continue
+        
+        if bname not in blank_series:
+            print(f"  {gname}: ERROR - blank group '{bname}' not found in data")
+            continue
+
+        bs = blank_series[bname]
+        sample_wells_present = [w for w in wells if w in od_df.columns]
+        
+
+
+        for well in sample_wells_present:
+            
+            # Get raw values for this sample well
+            od_raw  = od_df[well].values
+            fl1_raw = fl1_df[well].values if (fl1_df is not None and well in fl1_df.columns) else [np.nan] * len(time_vals)
+            fl2_raw = fl2_df[well].values if (fl2_df is not None and well in fl2_df.columns) else [np.nan] * len(time_vals)
+
+            # Get AVERAGE blank values (pre-computed from all blank wells for this condition)
+            od_blk  = bs["od"].values    # This is already the AVERAGE
+            print('BLANK',od_blk[2:],np.mean(od_blk[2:]),np.std(od_blk[2:]))
+     
+            fl1_blk = bs["fl1"].values if bs["fl1"] is not None else np.zeros(len(time_vals))
+            fl2_blk = bs["fl2"].values if bs["fl2"] is not None else np.zeros(len(time_vals))
+
+            # Subtract AVERAGE blank from each time point
+            # This ensures every sample well uses the same blank correction
+            for i, t in enumerate(time_vals):
+                records.append({
+                    "Time_h":           round(t, 4),
+                    "Well":             well,
+                    "Group":            gname,
+                    "Blank_used":       bname,
+                    "Absorbance_600":   od_raw[i] - np.mean(od_blk[2:]),## i am subtracting the blank mean not t point
+                    "Fluorescence_510": fl1_raw[i] - fl1_blk[i],
+                    "Fluorescence_550": fl2_raw[i] - fl2_blk[i],
+                })
+
+
+    # ========================================================================
+    # STEP 3: EXPORT TO CSV
+    # ========================================================================
+    
+    tidy = pd.DataFrame(records)
+    tidy.to_csv(out_path, index=False)
