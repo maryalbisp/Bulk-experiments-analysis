@@ -1,0 +1,251 @@
+
+def calculate_specific_growth_rate_simple(df, well_prefix, od_threshold=0.01, n_std=2.0):
+    """
+    Calculate specific growth rate using three-point method on log scale.
+
+    μ = d(ln OD)/dt
+
+    Process:
+    1. Calculate μ for all wells
+    2. Compute mean and std at each timepoint across wells
+    3. Mark outlier points (> n_std from mean) as invalid
+    4. Recalculate μ for affected wells using only valid OD points
+    5. Plot mean ± std before and after outlier removal
+
+    Parameters
+    ----------
+    df : DataFrame
+        Data with Time_h, Well, and Absorbance_600 columns
+    well_prefix : str
+        Well prefix to filter (e.g., 'F' or 'G')
+    od_threshold : float
+        Minimum OD value to include in calculations
+    n_std : float
+        Number of standard deviations from mean to consider valid
+
+    Returns
+    -------
+    result_df : DataFrame
+        Growth rate data with columns:
+        Well, Time_h, Absorbance_600, ln_OD, Specific_Growth_Rate, Valid
+    stats: DataFrame
+          Average growth rate stats across wells
+          Time_h,	mean,	std
+    """
+
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    def compute_time_stats(result_df, use_valid_only=False):
+        """Compute mean and std of μ at each timepoint."""
+        stats_rows = []
+
+        timepoints = sorted(result_df['Time_h'].dropna().unique())
+
+        for t in timepoints:
+            sub = result_df[result_df['Time_h'] == t].copy()
+
+            if use_valid_only:
+                sub = sub[sub['Valid'] == True]
+
+            mu_vals = sub['Specific_Growth_Rate'].dropna().values
+
+            if len(mu_vals) >= 2:
+                mean_val = np.mean(mu_vals)
+                std_val = np.std(mu_vals)
+            else:
+                mean_val = np.nan
+                std_val = np.nan
+
+            stats_rows.append({
+                'Time_h': t,
+                'mean': mean_val,
+                'std': std_val
+            })
+
+        return pd.DataFrame(stats_rows)
+
+    # Get all wells that start with the prefix
+    wells = sorted([w for w in df['Well'].unique() if w.startswith(well_prefix)])
+    #wells=[f'F{i}' for i in range(2, 10)] 
+
+    all_results = []
+
+    # ===== STEP 1: Initial μ calculation =====
+    for well in wells:
+        well_data = df[df['Well'] == well].sort_values('Time_h').reset_index(drop=True)
+
+        time = well_data['Time_h'].values
+        od = well_data['Absorbance_600'].values
+        n = len(od)
+
+        if n < 3:
+            continue
+
+        log_od = np.where(od > 0, np.log(od), np.nan)
+
+        for i in range(n):
+            if i == 0 or i == n - 1: # first and last points cannot use centered difference
+                all_results.append({
+                    'Well': well,
+                    'Time_h': time[i],
+                    'Absorbance_600': od[i],
+                    'ln_OD': log_od[i],
+                    'Specific_Growth_Rate': np.nan,
+                    'Valid': False
+                })
+                continue
+
+            od_prev = od[i - 1]
+            od_curr = od[i]
+            od_next = od[i + 1]
+            t_prev = time[i - 1]
+            t_curr = time[i]
+            t_next = time[i + 1]
+
+            can_calculate = ( # check if all OD values are positive and above threshold
+                od_prev > 0 and
+                od_curr > 0 and
+                od_next > 0 and
+                od_curr >= od_threshold
+            )
+
+            if can_calculate and (t_next - t_prev) > 0:
+                mu = (np.log(od_next) - np.log(od_prev)) / (t_next - t_prev)
+                valid = True
+            else:
+                mu = np.nan
+                valid = False
+
+            all_results.append({
+                'Well': well,
+                'Time_h': t_curr,
+                'Absorbance_600': od_curr,
+                'ln_OD': log_od[i],
+                'Specific_Growth_Rate': mu,
+                'Valid': valid
+            })
+
+    result_df = pd.DataFrame(all_results)
+
+    # ===== STEP 2: Stats BEFORE outlier removal =====
+    stats_before = compute_time_stats(result_df, use_valid_only=False) # use all points (including invalid) for initial stats
+
+    # ===== STEP 3: Mark outliers =====
+    outlier_points = []
+
+    for i, row in result_df.iterrows():
+        t = row['Time_h']
+        mu = row['Specific_Growth_Rate']
+
+        if np.isnan(mu): # if μ is NaN, skip
+            continue
+
+        stats_row = stats_before[stats_before['Time_h'] == t]
+        if stats_row.empty: # if no stats available for this timepoint, skip
+            continue
+
+        mean_val = stats_row['mean'].values[0]
+        std_val = stats_row['std'].values[0]
+
+        if np.isnan(mean_val) or np.isnan(std_val): # if stats are not valid, skip
+            continue
+
+        lower_bound = mean_val - n_std * std_val
+        upper_bound = mean_val + n_std * std_val
+
+        if mu < lower_bound or mu > upper_bound: # if μ is an outlier, mark as invalid
+            result_df.at[i, 'Valid'] = False
+            outlier_points.append((row['Well'], t))
+
+    # ===== STEP 4: Recalculate μ for affected wells ===== 
+    affected_wells = sorted(set([w for w, _ in outlier_points])) # get unique wells that had outliers
+
+    for well in affected_wells:
+        well_data = df[df['Well'] == well].sort_values('Time_h').reset_index(drop=True) # get original data for this well
+        time_orig = well_data['Time_h'].values
+        od_orig = well_data['Absorbance_600'].values
+
+        well_results = result_df[result_df['Well'] == well].copy() # get current results for this well
+
+        # keep only points still marked valid
+        valid_points = well_results[well_results['Valid'] == True][['Time_h', 'Absorbance_600']].copy()
+
+        # add back original points that are above OD threshold and not already included (e.g., first and last points)
+        for t, od_val in zip(time_orig, od_orig): 
+            is_outlier = (well, t) in outlier_points # check if this point was marked as an outlier
+            already_present = (valid_points['Time_h'] == t).any() # check if this timepoint is already in valid_points
+
+            if (od_val >= od_threshold) and (not is_outlier) and (not already_present): # if OD is above threshold and this point is not an outlier and not already included, add it back
+                valid_points.loc[len(valid_points)] = [t, od_val] # add new row to valid_points
+
+        valid_points = valid_points.sort_values('Time_h').reset_index(drop=True) # sort by time
+
+        if len(valid_points) < 3: # if less than 3 valid points, we cannot recalculate μ, so skip
+            continue
+
+        # first, invalidate all current μ values for this well
+        mask_well = result_df['Well'] == well # get mask for this well
+        result_df.loc[mask_well, 'Specific_Growth_Rate'] = np.nan # set all μ values for this well to NaN
+        result_df.loc[mask_well, 'Valid'] = False # set all points for this well to invalid (we will mark valid ones again as we recalculate)
+
+        # recalculate using only valid points
+        for i in range(1, len(valid_points) - 1): # loop through valid points, skipping first and last
+            t_prev = valid_points.loc[i - 1, 'Time_h']
+            t_curr = valid_points.loc[i, 'Time_h']
+            t_next = valid_points.loc[i + 1, 'Time_h']
+
+            od_prev = valid_points.loc[i - 1, 'Absorbance_600']
+            od_curr = valid_points.loc[i, 'Absorbance_600']
+            od_next = valid_points.loc[i + 1, 'Absorbance_600']
+
+            dt = t_next - t_prev
+
+            if od_prev > 0 and od_curr > 0 and od_next > 0 and dt > 0: # check if we can calculate μ
+                mu_new = (np.log(od_next) - np.log(od_prev)) / dt
+                valid_new = True
+            else:
+                mu_new = np.nan
+                valid_new = False
+
+            mask = (result_df['Well'] == well) & (result_df['Time_h'] == t_curr)
+            result_df.loc[mask, 'Specific_Growth_Rate'] = mu_new
+            result_df.loc[mask, 'Valid'] = valid_new
+
+    # ===== STEP 5: Stats AFTER outlier removal =====
+    stats_after = compute_time_stats(result_df, use_valid_only=True) # use only valid points for final stats
+
+    # ===== STEP 6: Plot before and after =====
+    plt.figure(figsize=(14, 8))
+
+    # Before
+    plt.plot(stats_before['Time_h'], stats_before['mean'], label='Mean μ before', linewidth=2)
+    plt.fill_between(
+        stats_before['Time_h'],
+        stats_before['mean'] - stats_before['std'],
+        stats_before['mean'] + stats_before['std'],
+        alpha=0.2,
+        label=f'±{n_std} SD before'
+    )
+
+    # After
+    plt.plot(stats_after['Time_h'], stats_after['mean'], label='Mean μ after', linewidth=2)
+    plt.fill_between(
+        stats_after['Time_h'],
+        stats_after['mean'] - stats_after['std'],
+        stats_after['mean'] + stats_after['std'],
+        alpha=0.2,
+        label=f'±{n_std} SD after'
+    )
+
+    plt.xlabel('Time (h)')
+    plt.ylabel('Specific growth rate μ (h$^{-1}$)')
+    plt.title(f'Average Specific growth rate before and after outlier removal ({well_prefix} wells)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.xlim(7, 20)
+    plt.ylim(0, 1)
+    plt.show()
+
+    return result_df,stats_after
